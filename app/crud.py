@@ -1,14 +1,28 @@
 from sqlalchemy.orm import Session
-from . import models, schemas
+import models, schemas
+from auth import get_password_hash
 from datetime import timedelta
 
-def create_service(db: Session, service: schemas.ServiceCreate):
-    db_service = models.Service(
-        name=service.name,
-        price=service.price,
-        duration_minutes=service.duration_minutes,
-        description=service.description
+# --- USUÁRIOS ---
+def get_user_by_email(db: Session, email: str):
+    return db.query(models.User).filter(models.User.email == email).first()
+
+def create_user(db: Session, user: schemas.UserCreate):
+    hashed_password = get_password_hash(user.password)
+    db_user = models.User(
+        name=user.name,
+        email=user.email,
+        password=hashed_password, 
+        role=user.role
     )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+# --- SERVIÇOS ---
+def create_service(db: Session, service: schemas.ServiceCreate):
+    db_service = models.Service(**service.dict())
     db.add(db_service)
     db.commit()
     db.refresh(db_service)
@@ -22,24 +36,22 @@ def delete_service(db: Session, service_id: int):
     if db_service:
         db_service.active = False
         db.commit()
+        db.refresh(db_service)
     return db_service
 
+# --- AGENDAMENTOS ---
 def create_appointment(db: Session, appointment: schemas.AppointmentCreate):
-    # 1. Busca o serviço para saber a duração
-    db_service = db.query(models.Service).filter(models.Service.id == appointment.service_id).first()
+    service = db.query(models.Service).filter(models.Service.id == appointment.service_id).first()
+    duration = service.duration_minutes if service else 30
     
-    if not db_service:
-        return None # Serviço não existe
+    end_time = appointment.start_time + timedelta(minutes=duration)
 
-    # 2. Calcula o horário de fim
-    calculated_end_time = appointment.start_time + timedelta(minutes=db_service.duration_minutes)
-
-    # 3. Cria o agendamento
     db_appointment = models.Appointment(
         client_name=appointment.client_name,
         service_id=appointment.service_id,
+        employee_id=appointment.employee_id,
         start_time=appointment.start_time,
-        end_time=calculated_end_time,
+        end_time=end_time,
         status="agendado"
     )
     db.add(db_appointment)
@@ -48,38 +60,16 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate):
     return db_appointment
 
 def get_appointments(db: Session, skip: int = 0, limit: int = 100):
-    # Traz os agendamentos e carrega os dados do serviço junto (join)
+    # Traz os nomes do serviço e do funcionário junto (eager loading opcional)
     return db.query(models.Appointment).offset(skip).limit(limit).all()
 
+# --- FUNCIONÁRIOS (AGORA BUSCA DA EQUIPE DE USERS) ---
+
 def create_employee(db: Session, employee: schemas.EmployeeCreate):
-    db_employee = models.Employee(
-        name=employee.name,
-        commission_percent=employee.commission_percent
-    )
-    db.add(db_employee)
-    db.commit()
-    db.refresh(db_employee)
-    return db_employee
+    # Essa função ficou obsoleta, usamos create_user agora, mas mantemos para não quebrar rotas antigas se houver
+    pass
 
 def get_employees(db: Session):
-    return db.query(models.Employee).filter(models.Employee.active == True).all()
-
-# ATENÇÃO: Atualize a função create_appointment para salvar o employee_id
-def create_appointment(db: Session, appointment: schemas.AppointmentCreate):
-    db_service = db.query(models.Service).filter(models.Service.id == appointment.service_id).first()
-    if not db_service: return None
-
-    calculated_end_time = appointment.start_time + timedelta(minutes=db_service.duration_minutes)
-
-    db_appointment = models.Appointment(
-        client_name=appointment.client_name,
-        service_id=appointment.service_id,
-        employee_id=appointment.employee_id, # <--- ADICIONE ISTO
-        start_time=appointment.start_time,
-        end_time=calculated_end_time,
-        status="agendado"
-    )
-    db.add(db_appointment)
-    db.commit()
-    db.refresh(db_appointment)
-    return db_appointment
+    # AQUI ESTÁ A MÁGICA: Retorna todos os usuários que NÃO SÃO clientes
+    # Ou seja, retorna Admins e Funcionários para aparecerem no agendamento
+    return db.query(models.User).filter(models.User.role.in_(['admin', 'employee'])).all()

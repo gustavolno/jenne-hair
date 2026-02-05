@@ -1,16 +1,40 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware # <--- Importe isso
+from fastapi.middleware.cors import CORSMiddleware 
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime, date
-from . import auth
-from . import models, database, schemas, crud
+from database import engine, get_db
+import auth
+import models, database, schemas, crud
+from fastapi.security import OAuth2PasswordBearer
 
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="Jenne Hair API")
 
-# --- ADICIONE ESTE BLOCO ---
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+# Função para verificar se é ADMIN
+def get_current_user_admin(token: str = Depends(oauth2_scheme), db: Session = Depends(database.get_db)):
+    # Decodifica o token
+    try:
+        payload = auth.jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    except:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    
+    # Busca o usuário no banco
+    user = db.query(models.User).filter(models.User.email == email).first()
+    
+    # A MÁGICA: Verifica se ele é admin
+    if user is None or user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso negado: Apenas administradores")
+    
+    return user
+
+
 origins = [
     "http://localhost:5173", # Porta padrão do Vite (Frontend)
     "http://localhost:3000",
@@ -25,7 +49,11 @@ app.add_middleware(
 )
 # Rota para cadastrar serviço
 @app.post("/servicos/", response_model=schemas.ServiceResponse)
-def criar_servico(service: schemas.ServiceCreate, db: Session = Depends(database.get_db)):
+def criar_servico(
+    service: schemas.ServiceCreate, 
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user_admin) # <--- AQUI
+):
     return crud.create_service(db=db, service=service)
 
 # Rota para listar serviços
@@ -96,12 +124,9 @@ def agendamentos_por_dia(data: str, employee_id: int = None, db: Session = Depen
     
     return query.all()
 
-@app.post("/funcionarios/", response_model=schemas.EmployeeResponse)
-def criar_funcionario(employee: schemas.EmployeeCreate, db: Session = Depends(database.get_db)):
-    return crud.create_employee(db, employee)
-
-@app.get("/funcionarios/", response_model=List[schemas.EmployeeResponse])
-def listar_funcionarios(db: Session = Depends(database.get_db)):
+@app.get("/users/", response_model=List[schemas.User])
+def listar_equipe(db: Session = Depends(database.get_db)):
+    # Usa a função do CRUD que já filtramos para trazer só Admins e Funcionários
     return crud.get_employees(db)
 
 # --- ROTAS DE AUTENTICAÇÃO ---
@@ -212,3 +237,11 @@ def deletar_usuario(user_id: int, db: Session = Depends(database.get_db)):
     db.delete(user)
     db.commit()
     return {"message": "Usuário removido com sucesso"}
+
+@app.post("/users/", status_code=201, response_model=schemas.User)
+def create_user(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email já cadastrado.")
+
+    return crud.create_user(db=db, user=user)
